@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"net/http"
 	"time"
@@ -34,9 +33,16 @@ type ViaCepResponse struct {
 	Error error
 }
 
+type ApiError struct {
+	Status     int    `json:"status"`
+	Ok         bool   `json:"ok"`
+	Message    string `json:"message"`
+	StatusText string `json:"statusText"`
+}
+
 type CdnCepResponse struct {
 	Data  *CdnCep
-	Error error
+	Error *ApiError
 }
 
 func main() {
@@ -73,21 +79,27 @@ func searchCep(writer http.ResponseWriter, request *http.Request) {
 
 	select {
 	case cep := <-c1:
+		if cep.Error != nil || cep.Data == nil || cep.Data.Cep == "" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if cep.Data.Cep == "" {
 			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
-		fmt.Printf("ViaCep")
 		writer.Header().Set("Content-Type", "applications/json")
 		writer.WriteHeader(http.StatusOK)
 		json.NewEncoder(writer).Encode(cep)
 		return
 	case cep := <-c2:
-		if cep.Data.Cep == "" {
+		if cep.Error != nil {
+			http.Error(writer, cep.Error.Message, cep.Error.Status)
+			return
+		}
+		if cep.Data == nil || cep.Data.Cep == "" {
 			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
-		fmt.Printf("CdnCep")
 		writer.Header().Set("Content-Type", "applications/json")
 		writer.WriteHeader(http.StatusOK)
 		json.NewEncoder(writer).Encode(cep)
@@ -120,18 +132,34 @@ func BuscaViaCep(cep string) ViaCepResponse {
 func BuscaCdnCep(cep string) CdnCepResponse {
 	formattedCep := cep[:5] + "-" + cep[5:]
 	resp, err := http.Get("https://cdn.apicep.com/file/apicep/" + formattedCep + ".json")
+
 	if err != nil {
-		return CdnCepResponse{Data: nil, Error: err}
+		return CdnCepResponse{Data: nil, Error: &ApiError{Message: err.Error(), Status: http.StatusInternalServerError}}
 	}
+
 	defer resp.Body.Close()
+
+	if resp.StatusCode == 429 {
+		var apiError ApiError
+		if err := json.NewDecoder(resp.Body).Decode(&apiError); err != nil {
+			return CdnCepResponse{Data: nil, Error: &ApiError{Message: err.Error(), Status: http.StatusTooManyRequests}}
+		}
+		return CdnCepResponse{Data: nil, Error: &apiError}
+	}
+
 	body, err := ioutil.ReadAll(resp.Body)
+
 	if err != nil {
-		return CdnCepResponse{Data: nil, Error: err}
+		if err != nil {
+			return CdnCepResponse{Data: nil, Error: &ApiError{Message: err.Error(), Status: http.StatusInternalServerError}}
+		}
 	}
+
 	var c CdnCep
-	err = json.Unmarshal(body, &c)
-	if err != nil {
-		return CdnCepResponse{Data: nil, Error: err}
+
+	if err := json.Unmarshal(body, &c); err != nil {
+		return CdnCepResponse{Data: nil, Error: &ApiError{Message: err.Error(), Status: http.StatusInternalServerError}}
 	}
-	return CdnCepResponse{Data: &c, Error: err}
+
+	return CdnCepResponse{Data: &c, Error: nil}
 }
